@@ -207,6 +207,21 @@ def test_hbos_static_query_and_outside_bin_parity(data):
     )
 
 
+def test_hbos_simd_tail():
+    rng = np.random.default_rng(85)
+    X = rng.normal(size=(193, 11))
+    Q = np.vstack(
+        [rng.normal(size=(37, 11)), np.full((1, 11), -100.0), np.full((1, 11), 100.0)]
+    )
+    ours = HBOS(n_bins=7, alpha=0.15, tol=0.35).fit(X)
+    upstream = PyODHBOS(n_bins=7, alpha=0.15, tol=0.35).fit(X)
+    assert np.allclose(
+        ours.decision_function(Q),
+        upstream.decision_function(Q),
+        atol=1e-12,
+    )
+
+
 def test_hbos_auto_fit_and_query_parity(data):
     X, Q = data
     ours = HBOS(n_bins="auto").fit(X)
@@ -215,6 +230,19 @@ def test_hbos_auto_fit_and_query_parity(data):
     assert np.allclose(ours.decision_scores_, upstream.decision_scores_, atol=1e-12)
     assert np.allclose(
         ours.decision_function(Q), upstream.decision_function(Q), atol=1e-12
+    )
+
+
+def test_hbos_parallel_score_path():
+    rng = np.random.default_rng(84)
+    X = rng.normal(size=(2_000, 17))
+    Q = rng.normal(size=(60_000, 17))
+    ours = HBOS(n_bins=10).fit(X)
+    upstream = PyODHBOS(n_bins=10).fit(X)
+    assert np.allclose(
+        ours.decision_function(Q),
+        upstream.decision_function(Q),
+        atol=1e-12,
     )
 
 
@@ -262,9 +290,9 @@ def test_ffi_rejects_empty_or_narrowed_inputs(bad):
 
 def test_ffi_rejects_null_buffers_before_pointer_construction():
     assert lib().mpy_knn_distances(0, 0, 0, 0, 1, 1, 1, 1, 2, 0) == -1
-    assert lib().mpy_hbos_score(0, 0, 0, 0, 1, 1, 2, 0.1, 0.5) == -1
+    assert lib().mpy_hbos_score(0, 0, 0, 0, 0, 1, 1, 2, 0.1, 0.5) == -1
     assert (
-        lib().mpy_hbos_score_auto(0, 0, 0, 0, 0, 0, 0, 1, 1, 0.1, 0.5)
+        lib().mpy_hbos_score_auto(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0.1, 0.5)
         == -1
     )
 

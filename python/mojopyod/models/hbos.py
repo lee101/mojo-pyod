@@ -57,6 +57,9 @@ class HBOS(BaseDetector):
             self._log_hist = f64(
                 np.log2(np.concatenate(self.hist_) + self.alpha)
             )
+            self._min_log_hist = f64(
+                [values.min() for values in self._log_hist_by_feature()]
+            )
         else:
             bins = int(self.n_bins)
             if bins < 2:
@@ -69,6 +72,7 @@ class HBOS(BaseDetector):
                 )
             self._edges = f64(self.bin_edges_)
             self._log_hist = f64(np.log2(self.hist_ + self.alpha))
+            self._min_log_hist = f64(self._log_hist.min(axis=0))
         self.decision_scores_ = self._score(X)
         self._process_decision_scores()
         return self
@@ -80,6 +84,7 @@ class HBOS(BaseDetector):
                 addr(X),
                 addr(self._edges),
                 addr(self._log_hist),
+                addr(self._min_log_hist),
                 addr(self._edge_offsets),
                 addr(self._hist_offsets),
                 addr(self._bins),
@@ -94,6 +99,7 @@ class HBOS(BaseDetector):
                 addr(X),
                 addr(self._edges),
                 addr(self._log_hist),
+                addr(self._min_log_hist),
                 addr(scores),
                 X.shape[0],
                 X.shape[1],
@@ -103,6 +109,11 @@ class HBOS(BaseDetector):
             )
         check_status(status, "HBOS kernel")
         return scores
+
+    def _log_hist_by_feature(self):
+        for feature, bins in enumerate(self._bins):
+            start = self._hist_offsets[feature]
+            yield self._log_hist[start : start + bins]
 
     def decision_function(self, X):
         if not hasattr(self, "hist_"):

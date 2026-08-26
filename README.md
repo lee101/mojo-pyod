@@ -82,18 +82,21 @@ used scikit-learn's brute neighbor backend for the KNN and LOF comparisons.
 
 | Case | mojo-pyod | PyOD | PyOD / Mojo |
 |---|---:|---:|---:|
-| KNN decision, Euclidean (6k train, 750 query, 24d) | 12.2 ms | 80.0 ms | 6.56x |
-| KNN decision, Manhattan (6k train, 750 query, 24d) | 28.6 ms | 77.7 ms | 2.72x |
-| KNN fit (2.5k x 24, k=10) | 33.4 ms | 145.6 ms | 4.36x |
-| LOF fit (2.5k x 24, k=20) | 30.4 ms | 253.7 ms | 8.34x |
-| HBOS decision (600k x 16, 10 bins) | 265.8 ms | 686.7 ms | 2.58x |
+| KNN decision, Euclidean (6k train, 750 query, 24d) | 6.8 ms | 19.2 ms | 2.83x |
+| KNN decision, Manhattan (6k train, 750 query, 24d) | 8.2 ms | 15.7 ms | 1.92x |
+| KNN fit (2.5k x 24, k=10) | 8.8 ms | 44.4 ms | 5.05x |
+| LOF fit (2.5k x 24, k=20) | 10.6 ms | 44.4 ms | 4.18x |
+| HBOS decision (600k x 16, 10 bins) | 20.2 ms | 551.2 ms | 27.28x |
 
 These measurements are specific to this CPU, array sizes, feature counts, and
 PyOD/scikit-learn versions. The Mojo kernels win all five cases in this run.
 Tree search can still be a better choice than this package's brute scan for
 lower-dimensional or much larger reference sets.
 
-There is no GPU path; execution remains on the CPU.
+There is no GPU path. Neighbor distance scans perform well below two FLOPs per
+byte moved, while HBOS is a branchy histogram lookup with small cached tables.
+Neither has enough arithmetic intensity to justify device transfers, so
+execution remains on the CPU.
 
 ## How it works
 
@@ -110,7 +113,9 @@ distance matrix. Euclidean search ranks squared distances and takes square
 roots only for the final neighbors. Large independent query batches run in
 coarse parallel chunks, while small batches stay serial. LOF reuses those
 neighbors for reachability-density calculations. HBOS precomputes invariant
-log densities in Python and performs bin lookup and score reduction in Mojo.
+log densities and per-feature minima in Python, then performs SIMD bin lookup
+and score reduction in Mojo. Large row batches use coarse parallel chunks;
+small batches stay serial.
 The Python boundary keeps every NumPy owner alive for the synchronous call,
 passes only contiguous buffers, and checks shapes, dtypes, pointer addresses,
 and the status returned by each kernel.

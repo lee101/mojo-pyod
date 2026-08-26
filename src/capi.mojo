@@ -13,6 +13,7 @@ comptime FPtr = Pointer[Float64, AnyOrigin[mut=True]]
 comptime IPtr = Pointer[Int64, AnyOrigin[mut=True]]
 comptime W = simd_width_of[DType.float64]()
 comptime PARALLEL_WORK_THRESHOLD = 8_000_000
+comptime HBOS_PARALLEL_WORK_THRESHOLD = 1_000_000
 comptime PARALLEL_WORKERS = 16
 
 
@@ -194,36 +195,55 @@ def mpy_knn_distances(
     return 0
 
 
-@export("mpy_hbos_score")
-def mpy_hbos_score(
-    x_addr: Int,
-    edges_addr: Int,
-    hist_addr: Int,
-    scores_addr: Int,
+def hbos_score(
+    x: FPtr,
+    edges: FPtr,
+    hist: FPtr,
+    minima: FPtr,
+    scores: FPtr,
     n: Int,
     d: Int,
     bins: Int,
-    alpha: Float64,
     tolerance: Float64,
-) abi("C") -> Int64:
-    if (
-        x_addr == 0
-        or edges_addr == 0
-        or hist_addr == 0
-        or scores_addr == 0
-        or n <= 0
-        or d <= 0
-        or bins < 2
-    ):
-        return -1
-    var x = fp(x_addr)
-    var edges = fp(edges_addr)
-    var hist = fp(hist_addr)
-    var scores = fp(scores_addr)
+):
+    @__parameter
+    def process_row(row: Int):
+        var vector_total = SIMD[DType.float64, W](0.0)
+        var feature = 0
+        while feature + W <= d:
+            var values = x.unsafe_load[width=W](row * d + feature)
+            var minimum = minima.unsafe_load[width=W](feature)
+            var first_edge = edges.unsafe_load[width=W](feature)
+            var first_hist = hist.unsafe_load[width=W](feature)
+            var first_width = (
+                edges.unsafe_load[width=W](d + feature) - first_edge
+            )
+            var near_first = values.le(first_edge) & (
+                (first_edge - values).le(first_width * tolerance)
+            )
+            var selected = near_first.select(first_hist, minimum)
+            for b in range(bins):
+                var edge = edges.unsafe_load[width=W](b * d + feature)
+                var density = hist.unsafe_load[width=W](b * d + feature)
+                selected = values.gt(edge).select(density, selected)
 
-    for row in range(n):
-        var total = 0.0
-        for feature in range(d):
+            var last_edge = edges.unsafe_load[width=W](bins * d + feature)
+            var last_hist = hist.unsafe_load[width=W](
+                (bins - 1) * d + feature
+            )
+            var last_width = last_edge - edges.unsafe_load[width=W](
+                (bins - 1) * d + feature
+            )
+            var above = values.gt(last_edge)
+            var near_last = (values - last_edge).le(last_width * tolerance)
+            selected = above.select(
+                near_last.select(last_hist, minimum), selected
+            )
+            vector_total += selected
+            feature += W
+
+        var total = vector_total.reduce_add()
+        while feature < d:
             var value = x[unsafe_offset=row * d + feature]
             var bin_index = 0
             while (
@@ -232,13 +252,7 @@ def mpy_hbos_score(
             ):
                 bin_index += 1
 
-            var minimum = hist[unsafe_offset=feature]
-            for b in range(1, bins):
-                var candidate = hist[unsafe_offset=b * d + feature]
-                if candidate < minimum:
-                    minimum = candidate
-
-            var selected = minimum
+            var selected = minima[unsafe_offset=feature]
             if bin_index == 0:
                 var width = (
                     edges[unsafe_offset=d + feature]
@@ -256,7 +270,63 @@ def mpy_hbos_score(
             else:
                 selected = hist[unsafe_offset=(bin_index - 1) * d + feature]
             total += selected
+            feature += 1
         scores[unsafe_offset=row] = -total
+
+    @__parameter
+    def process_chunk(chunk_index: Int):
+        var chunk_count = min(n, PARALLEL_WORKERS)
+        var chunk_size = (n + chunk_count - 1) // chunk_count
+        var first = chunk_index * chunk_size
+        var last = min(first + chunk_size, n)
+        for row in range(first, last):
+            process_row(row)
+
+    if n * d >= HBOS_PARALLEL_WORK_THRESHOLD:
+        parallelize[process_chunk](
+            min(n, PARALLEL_WORKERS), min(n, PARALLEL_WORKERS)
+        )
+    else:
+        for row in range(n):
+            process_row(row)
+
+
+@export("mpy_hbos_score")
+def mpy_hbos_score(
+    x_addr: Int,
+    edges_addr: Int,
+    hist_addr: Int,
+    minima_addr: Int,
+    scores_addr: Int,
+    n: Int,
+    d: Int,
+    bins: Int,
+    alpha: Float64,
+    tolerance: Float64,
+) abi("C") -> Int64:
+    if (
+        x_addr == 0
+        or edges_addr == 0
+        or hist_addr == 0
+        or minima_addr == 0
+        or scores_addr == 0
+        or n <= 0
+        or d <= 0
+        or bins < 2
+    ):
+        return -1
+    initialize_runtime()
+    hbos_score(
+        fp(x_addr),
+        fp(edges_addr),
+        fp(hist_addr),
+        fp(minima_addr),
+        fp(scores_addr),
+        n,
+        d,
+        bins,
+        tolerance,
+    )
     return 0
 
 
@@ -265,6 +335,7 @@ def mpy_hbos_score_auto(
     x_addr: Int,
     edges_addr: Int,
     hist_addr: Int,
+    minima_addr: Int,
     edge_offsets_addr: Int,
     hist_offsets_addr: Int,
     bins_addr: Int,
@@ -278,6 +349,7 @@ def mpy_hbos_score_auto(
         x_addr == 0
         or edges_addr == 0
         or hist_addr == 0
+        or minima_addr == 0
         or edge_offsets_addr == 0
         or hist_offsets_addr == 0
         or bins_addr == 0
@@ -289,12 +361,14 @@ def mpy_hbos_score_auto(
     var x = fp(x_addr)
     var edges = fp(edges_addr)
     var hist = fp(hist_addr)
+    var minima = fp(minima_addr)
     var edge_offsets = ip(edge_offsets_addr)
     var hist_offsets = ip(hist_offsets_addr)
     var bin_counts = ip(bins_addr)
     var scores = fp(scores_addr)
 
-    for row in range(n):
+    @__parameter
+    def process_row(row: Int):
         var total = 0.0
         for feature in range(d):
             var bins = Int(bin_counts[unsafe_offset=feature])
@@ -308,13 +382,7 @@ def mpy_hbos_score_auto(
             ):
                 bin_index += 1
 
-            var minimum = hist[unsafe_offset=hist_start]
-            for b in range(1, bins):
-                var candidate = hist[unsafe_offset=hist_start + b]
-                if candidate < minimum:
-                    minimum = candidate
-
-            var selected = minimum
+            var selected = minima[unsafe_offset=feature]
             if bin_index == 0:
                 var width = (
                     edges[unsafe_offset=edge_start + 1]
@@ -333,4 +401,22 @@ def mpy_hbos_score_auto(
                 selected = hist[unsafe_offset=hist_start + bin_index - 1]
             total += selected
         scores[unsafe_offset=row] = -total
+
+    @__parameter
+    def process_chunk(chunk_index: Int):
+        var chunk_count = min(n, PARALLEL_WORKERS)
+        var chunk_size = (n + chunk_count - 1) // chunk_count
+        var first = chunk_index * chunk_size
+        var last = min(first + chunk_size, n)
+        for row in range(first, last):
+            process_row(row)
+
+    initialize_runtime()
+    if n * d >= HBOS_PARALLEL_WORK_THRESHOLD:
+        parallelize[process_chunk](
+            min(n, PARALLEL_WORKERS), min(n, PARALLEL_WORKERS)
+        )
+    else:
+        for row in range(n):
+            process_row(row)
     return 0

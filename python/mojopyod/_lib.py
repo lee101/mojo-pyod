@@ -19,8 +19,8 @@ F = ctypes.c_double
 
 _SIGNATURES = {
     "mpy_knn_distances": ([I] * 10, I),
-    "mpy_hbos_score": ([I, I, I, I, I, I, I, F, F], I),
-    "mpy_hbos_score_auto": ([I] * 9 + [F, F], I),
+    "mpy_hbos_score": ([I] * 8 + [F, F], I),
+    "mpy_hbos_score_auto": ([I] * 10 + [F, F], I),
 }
 
 
