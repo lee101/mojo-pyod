@@ -4,12 +4,13 @@ Python owns every buffer. Addresses cross the C ABI as Int values and are
 rebuilt here with a concrete mutable origin.
 """
 
-from std.algorithm import parallelize
+from max.algorithm import parallelize
 from std.math import sqrt
+from std.runtime import initialize_runtime
 from std.sys.info import simd_width_of
 
-comptime FPtr = UnsafePointer[Float64, AnyOrigin[mut=True]]
-comptime IPtr = UnsafePointer[Int64, AnyOrigin[mut=True]]
+comptime FPtr = Pointer[Float64, AnyOrigin[mut=True]]
+comptime IPtr = Pointer[Int64, AnyOrigin[mut=True]]
 comptime W = simd_width_of[DType.float64]()
 comptime PARALLEL_WORK_THRESHOLD = 8_000_000
 comptime PARALLEL_WORKERS = 16
@@ -28,19 +29,21 @@ def manhattan_distance(a: FPtr, b: FPtr, d: Int) -> Float64:
     var acc1 = SIMD[DType.float64, W](0.0)
     var j = 0
     while j + 2 * W <= d:
-        var delta0 = a.load[width=W](j) - b.load[width=W](j)
-        var delta1 = a.load[width=W](j + W) - b.load[width=W](j + W)
+        var delta0 = a.unsafe_load[width=W](j) - b.unsafe_load[width=W](j)
+        var delta1 = a.unsafe_load[width=W](j + W) - b.unsafe_load[width=W](
+            j + W
+        )
         acc0 += max(delta0, -delta0)
         acc1 += max(delta1, -delta1)
         j += 2 * W
     var acc = acc0 + acc1
     while j + W <= d:
-        var delta = a.load[width=W](j) - b.load[width=W](j)
+        var delta = a.unsafe_load[width=W](j) - b.unsafe_load[width=W](j)
         acc += max(delta, -delta)
         j += W
     var total = acc.reduce_add()
     while j < d:
-        var delta = a[j] - b[j]
+        var delta = a[unsafe_offset=j] - b[unsafe_offset=j]
         total += delta if delta >= 0.0 else -delta
         j += 1
     return total
@@ -51,19 +54,21 @@ def squared_euclidean_distance(a: FPtr, b: FPtr, d: Int) -> Float64:
     var acc1 = SIMD[DType.float64, W](0.0)
     var j = 0
     while j + 2 * W <= d:
-        var delta0 = a.load[width=W](j) - b.load[width=W](j)
-        var delta1 = a.load[width=W](j + W) - b.load[width=W](j + W)
+        var delta0 = a.unsafe_load[width=W](j) - b.unsafe_load[width=W](j)
+        var delta1 = a.unsafe_load[width=W](j + W) - b.unsafe_load[width=W](
+            j + W
+        )
         acc0 += delta0 * delta0
         acc1 += delta1 * delta1
         j += 2 * W
     var acc = acc0 + acc1
     while j + W <= d:
-        var delta = a.load[width=W](j) - b.load[width=W](j)
+        var delta = a.unsafe_load[width=W](j) - b.unsafe_load[width=W](j)
         acc += delta * delta
         j += W
     var total = acc.reduce_add()
     while j < d:
-        var delta = a[j] - b[j]
+        var delta = a[unsafe_offset=j] - b[unsafe_offset=j]
         total += delta * delta
         j += 1
     return total
@@ -81,12 +86,12 @@ def knn_distances(
     metric: Int,
     exclude_self: Bool,
 ):
-    @parameter
+    @__parameter
     def process_query[is_manhattan: Bool](q: Int):
         var base = q * k
         for s in range(k):
-            distances[base + s] = 1.7976931348623157e308
-            indices[base + s] = -1
+            distances[unsafe_offset=base + s] = 1.7976931348623157e308
+            indices[unsafe_offset=base + s] = -1
 
         for r in range(n):
             if exclude_self and q == r:
@@ -94,27 +99,33 @@ def knn_distances(
             var dist: Float64
             comptime if is_manhattan:
                 dist = manhattan_distance(
-                    query + q * d, train + r * d, d
+                    query.unsafe_offset(q * d), train.unsafe_offset(r * d), d
                 )
             else:
                 dist = squared_euclidean_distance(
-                    query + q * d, train + r * d, d
+                    query.unsafe_offset(q * d), train.unsafe_offset(r * d), d
                 )
-            if dist >= distances[base + k - 1]:
+            if dist >= distances[unsafe_offset=base + k - 1]:
                 continue
             var s = k - 1
-            while s > 0 and distances[base + s - 1] > dist:
-                distances[base + s] = distances[base + s - 1]
-                indices[base + s] = indices[base + s - 1]
+            while s > 0 and distances[unsafe_offset=base + s - 1] > dist:
+                distances[unsafe_offset=base + s] = distances[
+                    unsafe_offset=base + s - 1
+                ]
+                indices[unsafe_offset=base + s] = indices[
+                    unsafe_offset=base + s - 1
+                ]
                 s -= 1
-            distances[base + s] = dist
-            indices[base + s] = Int64(r)
+            distances[unsafe_offset=base + s] = dist
+            indices[unsafe_offset=base + s] = Int64(r)
 
         comptime if not is_manhattan:
             for s in range(k):
-                distances[base + s] = sqrt(distances[base + s])
+                distances[unsafe_offset=base + s] = sqrt(
+                    distances[unsafe_offset=base + s]
+                )
 
-    @parameter
+    @__parameter
     def process_chunk[is_manhattan: Bool](chunk_index: Int):
         var chunk_count = min(m, PARALLEL_WORKERS)
         var chunk_size = (m + chunk_count - 1) // chunk_count
@@ -155,12 +166,19 @@ def mpy_knn_distances(
     exclude_self: Int,
 ) abi("C") -> Int64:
     if (
-        train_addr == 0 or query_addr == 0 or distances_addr == 0
-        or indices_addr == 0 or n <= 0 or d <= 0 or m <= 0 or k <= 0
+        train_addr == 0
+        or query_addr == 0
+        or distances_addr == 0
+        or indices_addr == 0
+        or n <= 0
+        or d <= 0
+        or m <= 0
+        or k <= 0
         or k > n - (1 if exclude_self != 0 else 0)
         or (metric != 1 and metric != 2)
     ):
         return -1
+    initialize_runtime()
     knn_distances(
         fp(train_addr),
         fp(query_addr),
@@ -189,8 +207,13 @@ def mpy_hbos_score(
     tolerance: Float64,
 ) abi("C") -> Int64:
     if (
-        x_addr == 0 or edges_addr == 0 or hist_addr == 0 or scores_addr == 0
-        or n <= 0 or d <= 0 or bins < 2
+        x_addr == 0
+        or edges_addr == 0
+        or hist_addr == 0
+        or scores_addr == 0
+        or n <= 0
+        or d <= 0
+        or bins < 2
     ):
         return -1
     var x = fp(x_addr)
@@ -201,31 +224,39 @@ def mpy_hbos_score(
     for row in range(n):
         var total = 0.0
         for feature in range(d):
-            var value = x[row * d + feature]
+            var value = x[unsafe_offset=row * d + feature]
             var bin_index = 0
-            while bin_index < bins + 1 and value > edges[bin_index * d + feature]:
+            while (
+                bin_index < bins + 1
+                and value > edges[unsafe_offset=bin_index * d + feature]
+            ):
                 bin_index += 1
 
-            var minimum = hist[feature]
+            var minimum = hist[unsafe_offset=feature]
             for b in range(1, bins):
-                var candidate = hist[b * d + feature]
+                var candidate = hist[unsafe_offset=b * d + feature]
                 if candidate < minimum:
                     minimum = candidate
 
             var selected = minimum
             if bin_index == 0:
-                var width = edges[d + feature] - edges[feature]
-                if edges[feature] - value <= width * tolerance:
-                    selected = hist[feature]
+                var width = (
+                    edges[unsafe_offset=d + feature]
+                    - edges[unsafe_offset=feature]
+                )
+                if edges[unsafe_offset=feature] - value <= width * tolerance:
+                    selected = hist[unsafe_offset=feature]
             elif bin_index == bins + 1:
-                var last_edge = edges[bins * d + feature]
-                var width = last_edge - edges[(bins - 1) * d + feature]
+                var last_edge = edges[unsafe_offset=bins * d + feature]
+                var width = (
+                    last_edge - edges[unsafe_offset=(bins - 1) * d + feature]
+                )
                 if value - last_edge <= width * tolerance:
-                    selected = hist[(bins - 1) * d + feature]
+                    selected = hist[unsafe_offset=(bins - 1) * d + feature]
             else:
-                selected = hist[(bin_index - 1) * d + feature]
+                selected = hist[unsafe_offset=(bin_index - 1) * d + feature]
             total += selected
-        scores[row] = -total
+        scores[unsafe_offset=row] = -total
     return 0
 
 
@@ -244,9 +275,15 @@ def mpy_hbos_score_auto(
     tolerance: Float64,
 ) abi("C") -> Int64:
     if (
-        x_addr == 0 or edges_addr == 0 or hist_addr == 0
-        or edge_offsets_addr == 0 or hist_offsets_addr == 0 or bins_addr == 0
-        or scores_addr == 0 or n <= 0 or d <= 0
+        x_addr == 0
+        or edges_addr == 0
+        or hist_addr == 0
+        or edge_offsets_addr == 0
+        or hist_offsets_addr == 0
+        or bins_addr == 0
+        or scores_addr == 0
+        or n <= 0
+        or d <= 0
     ):
         return -1
     var x = fp(x_addr)
@@ -260,32 +297,40 @@ def mpy_hbos_score_auto(
     for row in range(n):
         var total = 0.0
         for feature in range(d):
-            var bins = Int(bin_counts[feature])
-            var edge_start = Int(edge_offsets[feature])
-            var hist_start = Int(hist_offsets[feature])
-            var value = x[row * d + feature]
+            var bins = Int(bin_counts[unsafe_offset=feature])
+            var edge_start = Int(edge_offsets[unsafe_offset=feature])
+            var hist_start = Int(hist_offsets[unsafe_offset=feature])
+            var value = x[unsafe_offset=row * d + feature]
             var bin_index = 0
-            while bin_index < bins + 1 and value > edges[edge_start + bin_index]:
+            while (
+                bin_index < bins + 1
+                and value > edges[unsafe_offset=edge_start + bin_index]
+            ):
                 bin_index += 1
 
-            var minimum = hist[hist_start]
+            var minimum = hist[unsafe_offset=hist_start]
             for b in range(1, bins):
-                var candidate = hist[hist_start + b]
+                var candidate = hist[unsafe_offset=hist_start + b]
                 if candidate < minimum:
                     minimum = candidate
 
             var selected = minimum
             if bin_index == 0:
-                var width = edges[edge_start + 1] - edges[edge_start]
-                if edges[edge_start] - value <= width * tolerance:
-                    selected = hist[hist_start]
+                var width = (
+                    edges[unsafe_offset=edge_start + 1]
+                    - edges[unsafe_offset=edge_start]
+                )
+                if edges[unsafe_offset=edge_start] - value <= width * tolerance:
+                    selected = hist[unsafe_offset=hist_start]
             elif bin_index == bins + 1:
-                var last_edge = edges[edge_start + bins]
-                var width = last_edge - edges[edge_start + bins - 1]
+                var last_edge = edges[unsafe_offset=edge_start + bins]
+                var width = (
+                    last_edge - edges[unsafe_offset=edge_start + bins - 1]
+                )
                 if value - last_edge <= width * tolerance:
-                    selected = hist[hist_start + bins - 1]
+                    selected = hist[unsafe_offset=hist_start + bins - 1]
             else:
-                selected = hist[hist_start + bin_index - 1]
+                selected = hist[unsafe_offset=hist_start + bin_index - 1]
             total += selected
-        scores[row] = -total
+        scores[unsafe_offset=row] = -total
     return 0
