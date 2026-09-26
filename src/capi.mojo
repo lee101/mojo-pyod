@@ -4,17 +4,12 @@ Python owns every buffer. Addresses cross the C ABI as Int values and are
 rebuilt here with a concrete mutable origin.
 """
 
-from max.algorithm import parallelize
 from std.math import sqrt
-from std.runtime import initialize_runtime
 from std.sys.info import simd_width_of
 
 comptime FPtr = Pointer[Float64, AnyOrigin[mut=True]]
 comptime IPtr = Pointer[Int64, AnyOrigin[mut=True]]
 comptime W = simd_width_of[DType.float64]()
-comptime PARALLEL_WORK_THRESHOLD = 8_000_000
-comptime HBOS_PARALLEL_WORK_THRESHOLD = 1_000_000
-comptime PARALLEL_WORKERS = 16
 
 
 def fp(addr: Int) -> FPtr:
@@ -126,31 +121,12 @@ def knn_distances(
                     distances[unsafe_offset=base + s]
                 )
 
-    @__parameter
-    def process_chunk[is_manhattan: Bool](chunk_index: Int):
-        var chunk_count = min(m, PARALLEL_WORKERS)
-        var chunk_size = (m + chunk_count - 1) // chunk_count
-        var first = chunk_index * chunk_size
-        var last = min(first + chunk_size, m)
-        for q in range(first, last):
-            process_query[is_manhattan](q)
-
     if metric == 1:
-        if m * n * d >= PARALLEL_WORK_THRESHOLD:
-            parallelize[process_chunk[True]](
-                min(m, PARALLEL_WORKERS), min(m, PARALLEL_WORKERS)
-            )
-        else:
-            for q in range(m):
-                process_query[True](q)
+        for q in range(m):
+            process_query[True](q)
     else:
-        if m * n * d >= PARALLEL_WORK_THRESHOLD:
-            parallelize[process_chunk[False]](
-                min(m, PARALLEL_WORKERS), min(m, PARALLEL_WORKERS)
-            )
-        else:
-            for q in range(m):
-                process_query[False](q)
+        for q in range(m):
+            process_query[False](q)
 
 
 @export("mpy_knn_distances")
@@ -179,7 +155,6 @@ def mpy_knn_distances(
         or (metric != 1 and metric != 2)
     ):
         return -1
-    initialize_runtime()
     knn_distances(
         fp(train_addr),
         fp(query_addr),
@@ -273,22 +248,8 @@ def hbos_score(
             feature += 1
         scores[unsafe_offset=row] = -total
 
-    @__parameter
-    def process_chunk(chunk_index: Int):
-        var chunk_count = min(n, PARALLEL_WORKERS)
-        var chunk_size = (n + chunk_count - 1) // chunk_count
-        var first = chunk_index * chunk_size
-        var last = min(first + chunk_size, n)
-        for row in range(first, last):
-            process_row(row)
-
-    if n * d >= HBOS_PARALLEL_WORK_THRESHOLD:
-        parallelize[process_chunk](
-            min(n, PARALLEL_WORKERS), min(n, PARALLEL_WORKERS)
-        )
-    else:
-        for row in range(n):
-            process_row(row)
+    for row in range(n):
+        process_row(row)
 
 
 @export("mpy_hbos_score")
@@ -315,7 +276,6 @@ def mpy_hbos_score(
         or bins < 2
     ):
         return -1
-    initialize_runtime()
     hbos_score(
         fp(x_addr),
         fp(edges_addr),
@@ -402,21 +362,6 @@ def mpy_hbos_score_auto(
             total += selected
         scores[unsafe_offset=row] = -total
 
-    @__parameter
-    def process_chunk(chunk_index: Int):
-        var chunk_count = min(n, PARALLEL_WORKERS)
-        var chunk_size = (n + chunk_count - 1) // chunk_count
-        var first = chunk_index * chunk_size
-        var last = min(first + chunk_size, n)
-        for row in range(first, last):
-            process_row(row)
-
-    initialize_runtime()
-    if n * d >= HBOS_PARALLEL_WORK_THRESHOLD:
-        parallelize[process_chunk](
-            min(n, PARALLEL_WORKERS), min(n, PARALLEL_WORKERS)
-        )
-    else:
-        for row in range(n):
-            process_row(row)
+    for row in range(n):
+        process_row(row)
     return 0
